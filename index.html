@@ -1,0 +1,601 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Ninja Temple Run — Noah (Merged Final, spawn on first cave platform)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root { --hud-bg: rgba(255,255,255,0.92); }
+    html,body{height:100%;margin:0;background:#2b4b5b;font-family:Arial,Helvetica,sans-serif;overflow:hidden}
+    #wrap{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+    canvas{background:linear-gradient(#70c5ce,#a3d9ff);image-rendering:pixelated;border-radius:8px;display:block; box-shadow:0 10px 40px rgba(0,0,0,0.45)}
+    #hud{position:absolute;left:16px;top:14px;background:var(--hud-bg);padding:8px 12px;border-radius:8px;font-family:monospace;font-weight:bold;color:#222;z-index:30}
+    #hud .small{font-size:12px;font-weight:normal;color:#333;margin-left:8px}
+    #noah{position:absolute;right:18px;top:14px;background:rgba(255,255,255,0.46);padding:6px 10px;border-radius:8px;font-weight:bold;color:#111;font-family:"Courier New",monospace;z-index:30}
+    #status{position:absolute;left:50%;transform:translateX(-50%);top:18px;background:rgba(0,0,0,0.6);color:#fff;padding:6px 10px;border-radius:6px;font-family:monospace;display:none;z-index:30}
+    #rainbowHud{position:absolute;left:50%;transform:translateX(-50%);top:52px;background:rgba(0,0,0,0.6);color:#fff;padding:6px 10px;border-radius:6px;font-family:monospace;display:none;z-index:30}
+    #muteBtn{position:absolute;right:18px;bottom:18px;padding:8px 12px;border-radius:6px;border:none;background:#e74c3c;color:#fff;font-weight:bold;cursor:pointer;z-index:30}
+    /* retro Mario-style play again button */
+    #playAgain {
+      display:none;
+      position:absolute;
+      left:50%;
+      transform:translateX(-50%);
+      bottom:40px;
+      z-index:40;
+      background:#e32626;
+      color:#fff;
+      font-weight:700;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      border:4px solid #fff;
+      border-radius:12px;
+      padding:14px 28px;
+      box-shadow: 0 6px 0 #8b0000;
+      cursor:pointer;
+      font-size:18px;
+      letter-spacing:1px;
+    }
+    #playAgain:hover{ transform:translateX(-50%) translateY(-4px); box-shadow: 0 10px 0 #8b0000; }
+    @media (max-width:1100px){ canvas{width:95vw;height:auto} }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game" width="1200" height="540"></canvas>
+    <div id="hud">Coins: <span id="score">0</span> <span class="small">| Lives: <span id="lives">3</span></span></div>
+    <div id="noah">Noah</div>
+    <div id="status"></div>
+    <div id="rainbowHud">Bonus Coins: <span id="rainCount">0</span>/10</div>
+    <button id="muteBtn">Mute</button>
+    <button id="playAgain">▶ Play Again!</button>
+  </div>
+
+  <!-- Audio (replace URLs if desired) -->
+  <audio id="mainAudio" loop preload="auto">
+    <source src="https://files.catbox.moe/7v6s6y.mp3" type="audio/mpeg">
+  </audio>
+  <audio id="caveAudio" loop preload="auto">
+    <source src="https://files.catbox.moe/6m2s3n.mp3" type="audio/mpeg">
+  </audio>
+
+<script>
+/* Final merged build — ninja now spawns on the first cave platform on teleport in.
+   Features: main world (coins, blue power-ups, shurikens, temple),
+   playable cave (orange gradient + flicker, uniform stone blocks with cracks & moss),
+   tight particle swirl teleport with fade-out, retro Play Again button.
+*/
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const scoreEl = document.getElementById('score');
+const livesEl = document.getElementById('lives');
+const statusEl = document.getElementById('status');
+const rainbowHud = document.getElementById('rainbowHud');
+const rainCountEl = document.getElementById('rainCount');
+const muteBtn = document.getElementById('muteBtn');
+const playAgainBtn = document.getElementById('playAgain');
+const mainAudio = document.getElementById('mainAudio');
+const caveAudio = document.getElementById('caveAudio');
+
+let musicAllowed = true;
+mainAudio.volume = 0.45; caveAudio.volume = 0.0;
+mainAudio.play().catch(()=>{ musicAllowed = false; });
+caveAudio.play().catch(()=>{});
+
+muteBtn.addEventListener('click', () => {
+  if (mainAudio.paused && caveAudio.paused) { mainAudio.play(); caveAudio.play(); muteBtn.textContent='Mute'; }
+  else { mainAudio.pause(); caveAudio.pause(); muteBtn.textContent='Play'; }
+});
+playAgainBtn.addEventListener('click', restartGame);
+
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key] = true; if (!musicAllowed) { mainAudio.play().catch(()=>{}); caveAudio.play().catch(()=>{}); musicAllowed = true; }});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+/* CONFIG */
+const CONFIG = {
+  levelLength: 12000,
+  gravity: 0.7,
+  friction: 0.85,
+  speed: 4.2,
+  jump: 16,
+  caveJumpMultiplier: 1.2,
+  shurikenBaseSpeed: 2.5
+};
+
+/* STATE */
+let state = {
+  inCave: false,
+  caveWidth: 3600,
+  caveHeight: 420,
+  caveNeeded: 10,
+  caveCollected: 0,
+  returnX: 0,
+  returnY: 0,
+  teleporting: false,
+  gameEnded: false
+};
+
+/* PLAYER */
+const player = {
+  x: 80, y: 0, w: 32, h: 32,
+  vx: 0, vy: 0,
+  grounded: false,
+  invincible: false,
+  invTimer: 0,
+  lives: 3,
+  coins: 0,
+  color: 'black',
+  visible: true
+};
+
+/* WORLD */
+let platforms = [];
+let coins = [];
+let powerBoxes = [];
+let shurikens = [];
+let redBlocks = [];
+let temple = null;
+
+/* CAVE */
+const cave = {
+  startX: 160,
+  startY: 300,
+  platforms: [],
+  rainbow: [],
+  exit: null,
+  blockVisuals: []
+};
+
+/* PARTICLES */
+let particles = [];
+
+/* HELPERS */
+function rectColl(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function lerp(a,b,t){ return a + (b-a)*t; }
+function rand(min,max){ return min + Math.random()*(max-min); }
+
+/* BUILD MAIN WORLD */
+function buildMain() {
+  platforms = []; coins = []; powerBoxes = []; shurikens = []; redBlocks = [];
+  const L = CONFIG.levelLength;
+  for (let i=0;i<L;i+=60) platforms.push({x:i, y:H-60, w:60, h:60});
+  for (let i=300;i < L-800; i += 300) {
+    const baseY = 360 - (Math.random()*80);
+    platforms.push({x:i, y:baseY, w:80, h:18});
+    if (Math.random() < 0.98) coins.push({x:i+20, y: baseY-28, w:12, h:12});
+    if (Math.random() < 0.55) powerBoxes.push({x:i+28, y: baseY-62, w:26, h:26, used:false});
+  }
+  for (let i=160;i < L-600; i+=100) { if (Math.random() < 0.92) coins.push({x:i, y:H-96, w:12, h:12}); }
+  for (let i=1000;i < L-1000; i += 1200) {
+    let speed = CONFIG.shurikenBaseSpeed + Math.random()*1.0;
+    shurikens.push({x:i + Math.random()*400, y: H-80, vx: -speed, w:26, h:26, angle:0});
+  }
+  const redX = Math.floor(L * 0.48);
+  redBlocks.push({x:redX, y: H-120, w:40, h:40, active:true});
+  temple = {x: L - 420, y: H - 180, w:240, h:140};
+}
+
+/* BUILD CAVE */
+function buildCave() {
+  cave.platforms = []; cave.rainbow = []; cave.blockVisuals = [];
+  cave.exit = {x: cave.startX + state.caveWidth - 140, y: cave.startY - 140, w:48, h:48, active:false};
+  const start = cave.startX, cw = state.caveWidth, baseY = cave.startY;
+  const blockW = 120, blockH = 20;
+  const count = 14;
+  for (let i=0;i<count;i++) {
+    const px = start + i * (cw / count) + (Math.random()*40 - 20);
+    const py = baseY - Math.sin(i*0.7)*60 - (Math.random()*60);
+    cave.platforms.push({x:px, y:py, w:blockW, h:blockH});
+    // visuals
+    const cracks = [];
+    const cracksCount = 1 + Math.floor(Math.random()*3);
+    for (let c=0;c<cracksCount;c++){
+      const sx = 6 + Math.random()*(blockW-12);
+      const sy = 4 + Math.random()*6;
+      const ex = 6 + Math.random()*(blockW-12);
+      const ey = 8 + Math.random()*8;
+      cracks.push({sx,sy,ex,ey,thin: Math.random()*1.2 + 0.6});
+    }
+    const mosses = [];
+    const mossCount = Math.random() < 0.6 ? 1 + Math.floor(Math.random()*2) : 0;
+    for (let m=0;m<mossCount;m++){ const mx = 6 + Math.random()*(blockW-24); mosses.push({mx, mw:8 + Math.random()*16}); }
+    cave.blockVisuals.push({cracks, mosses});
+  }
+  // rainbow coins
+  let placed = 0;
+  for (let i=0;i<cave.platforms.length && placed < state.caveNeeded;i++){
+    const pl = cave.platforms[i];
+    if (Math.random() < 0.9) {
+      const rx = pl.x + 18 + Math.random()*(pl.w - 36);
+      const ry = pl.y - 28 - Math.floor(Math.random()*12);
+      cave.rainbow.push({x:rx, y:ry, w:16, h:16, collected:false});
+      placed++;
+    }
+  }
+  while (cave.rainbow.length < state.caveNeeded) {
+    const rx = start + Math.random()*(cw - 120);
+    const ry = baseY - 40 - Math.random()*160;
+    cave.rainbow.push({x:rx,y:ry,w:16,h:16,collected:false});
+  }
+  cave.exit.active = false;
+  state.caveCollected = 0;
+}
+
+/* AUDIO FADE */
+function fadeAudio(from, to, dur=500) {
+  const steps = 25; const interval = dur/steps;
+  let t=0;
+  const fromStart = from.volume;
+  to.volume = 0;
+  if (to.paused) to.play().catch(()=>{});
+  const id = setInterval(()=> {
+    t++; const p = t/steps;
+    from.volume = Math.max(0, lerp(fromStart, 0, p));
+    to.volume = Math.min(0.6, lerp(0, 0.45, p));
+    if (t>=steps) { clearInterval(id); try{ from.pause(); }catch(e){} to.volume = 0.45; }
+  }, interval);
+}
+
+/* PARTICLES (tight spiral) */
+function spawnTeleportParticles(screenX, screenY, count=32, tight=true) {
+  for (let i=0;i<count;i++){
+    const angle = (i / count) * Math.PI * 2 + Math.random()*0.6;
+    const baseR = tight ? rand(6,36) : rand(30,140);
+    const omega = (tight ? rand(8,16) : rand(2,6)) * (Math.random() < 0.5 ? 1 : -1);
+    const life = 400 + Math.random()*200;
+    const color = `rgba(255,${rand(80,160)|0},${rand(30,60)|0},1)`;
+    particles.push({sx: screenX, sy: screenY, angle, rad: baseR, omega, age:0, life, alpha:1, baseR, color});
+  }
+}
+function updateParticles(dt) {
+  for (let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.age += dt;
+    const t = p.age / p.life;
+    if (t >= 1) { particles.splice(i,1); continue; }
+    p.rad = lerp(p.baseR, Math.max(2, p.baseR * 0.12), t);
+    p.angle += p.omega * dt * 0.001;
+    p.alpha = 1 - t;
+  }
+}
+function drawParticles() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of particles){
+    const x = p.sx + Math.cos(p.angle) * p.rad;
+    const y = p.sy + Math.sin(p.angle) * p.rad - (p.age / p.life) * 12;
+    const sz = 3 + (1 - (p.age / p.life)) * 4;
+    ctx.fillStyle = p.color.replace(/,1\)$/, `,${p.alpha})`);
+    ctx.beginPath();
+    ctx.ellipse(x, y, sz, sz, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* play swirl at screen coords then callback */
+function playTeleSwirlAt(screenX, screenY, onComplete) {
+  state.teleporting = true;
+  player.visible = false;
+  particles = [];
+  spawnTeleportParticles(screenX, screenY, 32, true);
+  const dur = 500;
+  const start = performance.now();
+  function anim(now) {
+    const dt = now - (anim.last || start);
+    anim.last = now;
+    updateParticles(dt);
+    if (now - start < dur) requestAnimationFrame(anim);
+    else {
+      setTimeout(()=> {
+        state.teleporting = false;
+        particles = [];
+        player.visible = true;
+        onComplete && onComplete();
+      }, 0);
+    }
+  }
+  requestAnimationFrame(anim);
+}
+
+/* ENTER/LEAVE CAVE (spawn on first cave platform) */
+function enterCave() {
+  if (state.gameEnded) return;
+  const screenX = player.x - cameraX + player.w/2;
+  const screenY = player.y + player.h/2;
+  state.returnX = player.x; state.returnY = player.y;
+  playTeleSwirlAt(screenX, screenY, () => {
+    buildCave();
+    try { caveAudio.play(); } catch(e){}
+    fadeAudio(mainAudio, caveAudio, 500);
+    state.inCave = true;
+    player.vx = player.vy = 0;
+    // spawn on first cave platform if available
+    if (cave.platforms && cave.platforms.length > 0) {
+      const p0 = cave.platforms[0];
+      player.x = p0.x + 8;            // stand a little inside the first platform
+      player.y = p0.y - player.h;     // on top of the platform
+    } else {
+      player.x = cave.startX + 24;
+      player.y = cave.startY - 40;
+    }
+    cave.exit.active = false;
+    rainbowHud.style.display = 'block';
+    showStatus("Entered Cave — collect all bonus coins!", 1400);
+  });
+}
+
+function leaveCave() {
+  if (state.gameEnded) return;
+  const exScreenX = cave.exit.x - caveCamera + cave.exit.w/2;
+  const exScreenY = cave.exit.y + cave.exit.h/2;
+  playTeleSwirlAt(exScreenX, exScreenY, () => {
+    try { mainAudio.play(); } catch(e){}
+    fadeAudio(caveAudio, mainAudio, 500);
+    state.inCave = false;
+    player.x = Math.max(80, state.returnX + 12);
+    player.y = Math.max(80, state.returnY - 10);
+    player.vx = player.vy = 0;
+    rainbowHud.style.display = 'none';
+    showStatus("Returned to main world!", 1000);
+  });
+}
+
+/* STATUS */
+let statusTimer = null;
+function showStatus(text, ms=1400, persistent=false) {
+  statusEl.style.display = 'block';
+  statusEl.textContent = text;
+  if (!persistent) { if (statusTimer) clearTimeout(statusTimer); statusTimer = setTimeout(()=> statusEl.style.display='none', ms); }
+}
+
+/* END / RESTART */
+function endGame(message) {
+  state.gameEnded = true;
+  showStatus(message, 99999, true);
+  playAgainBtn.style.display = 'block';
+  try { mainAudio.pause(); caveAudio.pause(); } catch(e){}
+}
+function restartGame() { setupGame(); }
+
+/* MAIN UPDATE */
+let cameraX = 0;
+function updateMain(dt) {
+  if (state.teleporting || state.gameEnded) return;
+  if (keys['ArrowLeft'] || keys['a']) player.vx = -CONFIG.speed;
+  else if (keys['ArrowRight'] || keys['d']) player.vx = CONFIG.speed;
+  else player.vx *= CONFIG.friction;
+  if ((keys['ArrowUp'] || keys['w'] || keys[' ']) && player.grounded) { player.vy = -CONFIG.jump; player.grounded = false; }
+  player.vy += CONFIG.gravity;
+  player.x += player.vx; player.y += player.vy;
+  player.grounded = false;
+  for (const p of platforms) {
+    if (rectColl(player,p)) {
+      if (player.vy > 0 && (player.y + player.h - player.vy) <= p.y) { player.y = p.y - player.h; player.vy = 0; player.grounded = true; }
+      else if (player.vy < 0 && (player.y >= p.y + p.h - 6)) { player.y = p.y + p.h; player.vy = 2; }
+    }
+  }
+  for (let i=coins.length-1;i>=0;i--) { if (rectColl(player, coins[i])) { coins.splice(i,1); player.coins++; scoreEl.textContent = player.coins; } }
+  for (let i=powerBoxes.length-1;i>=0;i--) {
+    const b = powerBoxes[i];
+    if (rectColl(player,b)) {
+      powerBoxes.splice(i,1);
+      if (Math.random() < 0.5) { player.lives++; livesEl.textContent = player.lives; showStatus("+1 Life!",1100); }
+      else { player.invincible = true; player.invTimer = 180; showStatus("Invincible!",1100); }
+    }
+  }
+  if (player.invincible) {
+    player.invTimer--; if (player.invTimer <= 0) { player.invincible = false; player.color = 'black'; } else { const hues=['red','orange','yellow','green','blue','indigo','violet']; player.color = hues[Math.floor(Math.random()*hues.length)]; }
+  } else player.color = 'black';
+  for (const s of shurikens) {
+    s.x += s.vx; s.angle += 0.14;
+    if (s.x < -400) s.x = CONFIG.levelLength + 100 + Math.random()*300;
+    if (rectColl(player,s)) {
+      if (!player.invincible) {
+        player.lives--;
+        livesEl.textContent = player.lives;
+        player.x = Math.max(60, player.x - 140);
+        player.vx = -1;
+        if (player.lives <= 0) { endGame("GAME OVER"); }
+      }
+    }
+  }
+  for (const r of redBlocks) { if (r.active && rectColl(player,r)) { enterCave(); return; } }
+  if (rectColl(player, temple)) { endGame("🏯 YOU WIN, Noah! 🎉"); }
+  player.x = clamp(player.x, 0, CONFIG.levelLength - player.w);
+  if (player.y > H + 200) { player.x = Math.max(60, player.x - 220); player.y = 40; player.vy = 0; }
+  cameraX = clamp(player.x - W/2, 0, CONFIG.levelLength - W);
+}
+
+/* CAVE UPDATE */
+let caveCamera = 0;
+let caveLightPhase = Math.random()*10;
+function updateCave(dt) {
+  if (state.teleporting || state.gameEnded) return;
+  if (keys['ArrowLeft'] || keys['a']) player.vx = -CONFIG.speed;
+  else if (keys['ArrowRight'] || keys['d']) player.vx = CONFIG.speed;
+  else player.vx *= CONFIG.friction;
+  if ((keys['ArrowUp'] || keys['w'] || keys[' ']) && player.grounded) { player.vy = -CONFIG.jump * CONFIG.caveJumpMultiplier; player.grounded = false; }
+  player.vy += CONFIG.gravity; player.x += player.vx; player.y += player.vy;
+  player.grounded = false;
+  for (const p of cave.platforms) {
+    if (rectColl(player,p)) {
+      if (player.vy > 0 && (player.y + player.h - player.vy) <= p.y) { player.y = p.y - player.h; player.vy = 0; player.grounded = true; }
+      else if (player.vy < 0 && (player.y >= p.y + p.h - 6)) { player.y = p.y + p.h; player.vy = 2; }
+    }
+  }
+  for (let i=0;i<cave.rainbow.length;i++){
+    const rc = cave.rainbow[i];
+    if (!rc.collected && rectColl(player, rc)) { rc.collected = true; state.caveCollected++; rainCountEl.textContent = state.caveCollected; }
+  }
+  if (!cave.exit.active && state.caveCollected >= state.caveNeeded) {
+    cave.exit.active = true;
+    showStatus("✅ All Bonus Coins Collected! Red Portal Reactivated!", 2200);
+  }
+  if (cave.exit.active && rectColl(player, cave.exit)) { leaveCave(); return; }
+  const leftBound = cave.startX - 20;
+  const rightBound = cave.startX + state.caveWidth - player.w - 20;
+  player.x = clamp(player.x, leftBound, rightBound);
+  if (player.y > H - 20) { player.y = cave.startY - 40; player.vy = 0; }
+  caveCamera = clamp(player.x - W/2, cave.startX - 100, cave.startX + state.caveWidth - W + 100);
+  caveLightPhase += (1 / (60 * 5));
+}
+
+/* DRAW MAIN */
+function drawMain() {
+  ctx.fillStyle = '#DDE9F0';
+  ctx.fillRect(-cameraX, H-260, CONFIG.levelLength, 120);
+  ctx.fillStyle = '#3c8e3f';
+  for (const p of platforms) {
+    ctx.fillRect(p.x - cameraX, p.y, p.w, p.h);
+    ctx.fillStyle = '#2f7b33';
+    ctx.fillRect(p.x - cameraX, p.y-6, Math.min(24,p.w), 6);
+    ctx.fillStyle = '#3c8e3f';
+  }
+  for (const c of coins) {
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath();
+    ctx.arc(c.x - cameraX + c.w/2, c.y + c.h/2, c.w/2, 0, Math.PI*2);
+    ctx.fill();
+  }
+  for (const b of powerBoxes) {
+    ctx.fillStyle = '#0077be';
+    ctx.fillRect(b.x - cameraX, b.y, b.w, b.h);
+    ctx.strokeStyle = '#003f5c'; ctx.lineWidth = 2; ctx.strokeRect(b.x - cameraX, b.y, b.w, b.h);
+    ctx.fillStyle = '#fff'; ctx.font = '14px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('?', b.x - cameraX + b.w/2, b.y + b.h/2 + 5);
+  }
+  for (const r of redBlocks) {
+    if (!r.active) continue;
+    ctx.fillStyle = '#c92a2a'; ctx.fillRect(r.x - cameraX, r.y, r.w, r.h);
+    ctx.strokeStyle = '#800'; ctx.strokeRect(r.x - cameraX, r.y, r.w, r.h);
+    ctx.fillStyle = 'rgba(255,90,40,0.12)'; ctx.fillRect(r.x - cameraX - 14, r.y - 14, r.w + 28, r.h + 28);
+  }
+  for (const s of shurikens) {
+    ctx.save();
+    ctx.translate(s.x - cameraX + s.w/2, s.y + s.h/2);
+    ctx.rotate(s.angle || 0);
+    ctx.fillStyle = '#a5a5a5';
+    ctx.beginPath(); ctx.moveTo(-s.w/2,0); ctx.lineTo(0,-s.h/2); ctx.lineTo(s.w/2,0); ctx.lineTo(0,s.h/2); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  ctx.fillStyle = '#c7a200'; ctx.fillRect(temple.x - cameraX, temple.y, temple.w, temple.h);
+  ctx.fillStyle = '#8a6e00'; ctx.fillRect(temple.x - cameraX + 70, temple.y + 44, 60, 78);
+  ctx.fillStyle = '#555'; ctx.fillRect(temple.x - cameraX + 70, temple.y + 44, 60, 6);
+}
+
+/* DRAW CAVE */
+function drawCave() {
+  const pulse = 0.6 + 0.4 * Math.sin(caveLightPhase * 2 * Math.PI * 0.2);
+  const centerX = W/2, centerY = H/2;
+  const g = ctx.createLinearGradient(0,0,W,0);
+  const bright = Math.floor(200 + 30 * pulse);
+  const rcol = bright, gcol = Math.floor(110 + 20 * pulse), bcol = 40;
+  g.addColorStop(0, `rgb(${Math.floor(rcol*0.6)},${Math.floor(gcol*0.55)},${Math.floor(bcol*0.4)})`);
+  g.addColorStop(0.5, `rgb(${rcol},${gcol},${bcol})`);
+  g.addColorStop(1, `rgb(${Math.floor(rcol*0.45)},${Math.floor(gcol*0.4)},${Math.floor(bcol*0.3)})`);
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  const radial = ctx.createRadialGradient(centerX, centerY - 40, 20, centerX, centerY - 40, 520);
+  radial.addColorStop(0, `rgba(255,170,80,${0.18 * pulse})`); radial.addColorStop(1, 'rgba(0,0,0,0.75)');
+  ctx.fillStyle = radial; ctx.fillRect(0,0,W,H);
+
+  for (let i=0;i<cave.platforms.length;i++){
+    const p = cave.platforms[i];
+    const v = cave.blockVisuals[i] || {cracks:[], mosses:[]};
+    const x = p.x - caveCamera, y = p.y;
+    ctx.fillStyle = '#6b6156'; ctx.fillRect(x, y, p.w, p.h);
+    ctx.fillStyle = `rgba(255,140,40,${0.02 * pulse})`; ctx.fillRect(x, y, p.w, 3);
+    ctx.strokeStyle = '#4c463f'; ctx.lineWidth = 2; ctx.strokeRect(x, y, p.w, p.h);
+    ctx.strokeStyle = 'rgba(30,30,30,0.95)'; ctx.lineWidth = 1.2;
+    for (const crack of v.cracks) {
+      ctx.beginPath();
+      ctx.moveTo(x + crack.sx, y + crack.sy);
+      const mx = x + (crack.sx + crack.ex)/2 + (Math.random()*6-3);
+      const my = y + (crack.sy + crack.ey)/2 + (Math.random()*6-3);
+      ctx.lineTo(mx, my); ctx.lineTo(x + crack.ex, y + crack.ey); ctx.stroke();
+    }
+    for (const moss of v.mosses) {
+      const mx = x + moss.mx, mw = moss.mw;
+      const mg = ctx.createLinearGradient(mx, y, mx+mw, y);
+      mg.addColorStop(0, '#2c6b2c'); mg.addColorStop(1, '#68a468');
+      ctx.fillStyle = mg;
+      ctx.beginPath(); ctx.ellipse(mx + mw/2, y + 6, mw/2, 6, 0, 0, Math.PI*2); ctx.fill();
+    }
+  }
+
+  for (const rc of cave.rainbow) {
+    if (rc.collected) continue;
+    const cx = rc.x - caveCamera + rc.w/2; const cy = rc.y + rc.h/2;
+    const cols = ['#ff4d4d','#ffb84d','#fff34d','#7dff6f','#4da6ff','#8c6bff','#ff4dca'];
+    for (let i=0;i<cols.length;i++){ ctx.beginPath(); ctx.fillStyle = cols[i]; ctx.arc(cx, cy, rc.w/2 - i*1.6, 0, Math.PI*2); ctx.fill(); }
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI*2); ctx.fill();
+  }
+
+  if (cave.exit) {
+    const ex = cave.exit.x - caveCamera, ey = cave.exit.y;
+    if (cave.exit.active) {
+      ctx.fillStyle = '#ff1f1f'; ctx.fillRect(ex, ey, cave.exit.w, cave.exit.h);
+      ctx.strokeStyle = '#800'; ctx.strokeRect(ex, ey, cave.exit.w, cave.exit.h);
+      ctx.fillStyle = 'rgba(255,60,60,0.16)'; ctx.fillRect(ex-12, ey-12, cave.exit.w+24, cave.exit.h+24);
+    } else {
+      const glow = 0.06 + 0.04 * Math.sin(caveLightPhase*0.4);
+      ctx.fillStyle = '#c92a2a'; ctx.fillRect(ex, ey, cave.exit.w, cave.exit.h);
+      ctx.strokeStyle = '#800'; ctx.strokeRect(ex, ey, cave.exit.w, cave.exit.h);
+      ctx.fillStyle = `rgba(255,90,40,${glow})`; ctx.fillRect(ex-12, ey-12, cave.exit.w+24, cave.exit.h+24);
+    }
+  }
+  ctx.fillStyle = '#251d18'; ctx.fillRect(0,0,40,H); ctx.fillRect(W-40,0,40,H);
+}
+
+/* DRAW PLAYER */
+function drawPlayerMain() {
+  if (!player.visible) return;
+  ctx.fillStyle = player.color; ctx.fillRect(player.x - cameraX, player.y, player.w, player.h);
+  ctx.fillStyle = '#fff'; ctx.fillRect(player.x - cameraX + 8, player.y + 8, 5, 5); ctx.fillRect(player.x - cameraX + 19, player.y + 8, 5, 5);
+  ctx.fillStyle = '#d93b3b'; ctx.fillRect(player.x - cameraX, player.y + 4, player.w, 6);
+  if (!player.grounded) { ctx.fillStyle = '#d93b3b'; ctx.beginPath(); ctx.moveTo(player.x - cameraX + player.w - 6, player.y + 6); ctx.lineTo(player.x - cameraX + player.w + 8, player.y + 2); ctx.lineTo(player.x - cameraX + player.w - 2, player.y + 12); ctx.closePath(); ctx.fill(); }
+}
+function drawPlayerCave() {
+  if (!player.visible) return;
+  ctx.fillStyle = player.color; ctx.fillRect(player.x - caveCamera, player.y, player.w, player.h);
+  ctx.fillStyle = '#fff'; ctx.fillRect(player.x - caveCamera + 8, player.y + 8, 5, 5); ctx.fillRect(player.x - caveCamera + 19, player.y + 8, 5, 5);
+  ctx.fillStyle = '#d93b3b'; ctx.fillRect(player.x - caveCamera, player.y + 4, player.w, 6);
+}
+
+/* MAIN LOOP */
+let last = performance.now();
+function loop(now) {
+  const dt = now - last; last = now;
+  if (!state.inCave) updateMain(dt); else updateCave(dt);
+  ctx.clearRect(0,0,W,H);
+  if (!state.inCave) { drawMain(); drawPlayerMain(); } else { drawCave(); drawPlayerCave(); }
+  updateParticles(dt); drawParticles();
+  scoreEl.textContent = player.coins; livesEl.textContent = player.lives; rainCountEl.textContent = state.caveCollected + "/" + state.caveNeeded;
+  requestAnimationFrame(loop);
+}
+
+/* SETUP / RESET */
+function setupGame() {
+  state.inCave = false; state.caveCollected = 0; state.returnX = 0; state.returnY = 0; state.teleporting = false; state.gameEnded = false;
+  player.lives = 3; player.coins = 0; player.invincible = false; player.invTimer = 0; player.color='black'; player.visible = true;
+  buildMain(); buildCave();
+  player.x = 80; player.y = H - 60 - player.h; player.vx = player.vy = 0;
+  cameraX = 0; caveCamera = 0;
+  scoreEl.textContent = player.coins; livesEl.textContent = player.lives;
+  rainbowHud.style.display = 'none'; playAgainBtn.style.display = 'none'; statusEl.style.display = 'none';
+  try { mainAudio.currentTime = 0; caveAudio.currentTime = 0; mainAudio.play(); caveAudio.play(); } catch(e){}
+}
+
+setupGame();
+requestAnimationFrame(loop);
+
+/* expose restart */
+function restartGame() { setupGame(); }
+
+</script>
+</body>
+</html>
